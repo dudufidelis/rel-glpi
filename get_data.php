@@ -31,7 +31,7 @@ if (!preg_match("/^\d{4}-\d{2}-\d{2}$/", $end) || !strtotime($end)) {
     exit;
 }
 
-$where = "WHERE t.date >= :start AND t.date <= :end";
+$where = "WHERE t.is_deleted = 0 AND t.date >= :start AND t.date <= :end";
 $params = [':start' => $start . ' 00:00:00', ':end' => $end . ' 23:59:59'];
 
 if ($category !== 'all') {
@@ -44,10 +44,29 @@ if ($category !== 'all') {
     $params[':catid'] = (int)$category; // Garante que é um inteiro
 }
 
-// Lógica para Cards de status (com agregação de 5 e 6 para Resolvido e adição de Total)
-$statusSQL = "SELECT t.status, COUNT(*) as total FROM glpi_tickets t $where GROUP BY t.status";
+// Lógica para Cards de status
+// Chamados abertos (status 1,2,3,4) são contados INDEPENDENTE da data
+// Chamados resolvidos/fechados (status 5,6) são filtrados pela data
+$statusSQL = "
+    SELECT t.status, COUNT(*) as total 
+    FROM glpi_tickets t 
+    WHERE t.is_deleted = 0 
+    AND (
+        (t.status NOT IN (5, 6)) 
+        OR 
+        (t.status IN (5, 6) AND t.date >= :start AND t.date <= :end)
+    )
+";
+$statusParams = [':start' => $start . ' 00:00:00', ':end' => $end . ' 23:59:59'];
+
+if ($category !== 'all') {
+    $statusSQL .= " AND t.itilcategories_id = :catid";
+    $statusParams[':catid'] = (int)$category;
+}
+
+$statusSQL .= " GROUP BY t.status";
 $stmt = $pdo->prepare($statusSQL);
-$stmt->execute($params);
+$stmt->execute($statusParams);
 $statusRawData = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $statusDataAggregated = [
@@ -118,10 +137,30 @@ $exportStatusMap = [
     6 => 'Resolvido'
 ];
 
-// Dados para exportação (agora incluindo status e nome completo do requerente)
-$ticketsSQL = "SELECT t.date, t.name, t.content, t.status, CONCAT(u.firstname, ' ', u.realname) as full_requester_name FROM glpi_tickets t LEFT JOIN glpi_users u ON t.users_id_recipient = u.id $where ORDER BY t.date DESC LIMIT 100";
+// Dados para exportação
+// Chamados abertos (status 1,2,3,4) aparecem INDEPENDENTE da data
+// Chamados resolvidos/fechados (status 5,6) são filtrados pela data
+$ticketsSQL = "
+    SELECT t.id, t.date, t.name, t.content, t.status, CONCAT(u.firstname, ' ', u.realname) as full_requester_name 
+    FROM glpi_tickets t 
+    LEFT JOIN glpi_users u ON t.users_id_recipient = u.id 
+    WHERE t.is_deleted = 0 
+    AND (
+        (t.status NOT IN (5, 6)) 
+        OR 
+        (t.status IN (5, 6) AND t.date >= :start AND t.date <= :end)
+    )
+";
+$ticketsParams = [':start' => $start . ' 00:00:00', ':end' => $end . ' 23:59:59'];
+
+if ($category !== 'all') {
+    $ticketsSQL .= " AND t.itilcategories_id = :catid";
+    $ticketsParams[':catid'] = (int)$category;
+}
+
+$ticketsSQL .= " ORDER BY t.status ASC, t.date DESC";
 $stmt = $pdo->prepare($ticketsSQL);
-$stmt->execute($params);
+$stmt->execute($ticketsParams);
 $ticketsRaw = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 $tickets = array_map(function($ticket) use ($exportStatusMap) {
@@ -129,12 +168,40 @@ $tickets = array_map(function($ticket) use ($exportStatusMap) {
     return $ticket;
 }, $ticketsRaw);
 
-// Gráfico por mês (fixo nos últimos 24 meses)
-$date24MonthsAgo = date('Y-m-d', strtotime('-24 months'));
-$mensalSQL = "SELECT DATE_FORMAT(t.date, '%Y-%m') as mes, COUNT(*) as total FROM glpi_tickets t WHERE t.date >= :date24MonthsAgo GROUP BY mes ORDER BY mes ASC";
+// Gráfico por mês (ÚLTIMOS 12 MESES, com filtro de categoria)
+$mensalSQL = "
+    SELECT DATE_FORMAT(t.date, '%Y-%m') as mes, COUNT(*) as total 
+    FROM glpi_tickets t 
+    WHERE t.is_deleted = 0 
+    AND t.date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
+";
+$mensalParams = [];
+
+if ($category !== 'all') {
+    $mensalSQL .= " AND t.itilcategories_id = :catid";
+    $mensalParams[':catid'] = (int)$category;
+}
+
+$mensalSQL .= " GROUP BY mes ORDER BY mes ASC";
 $stmt = $pdo->prepare($mensalSQL);
-$stmt->execute([':date24MonthsAgo' => $date24MonthsAgo . ' 00:00:00']);
-$mensal = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$stmt->execute($mensalParams);
+$mensalRaw = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// Gerar array com todos os 12 últimos meses (mesmo sem dados)
+$mensal = [];
+for ($i = 11; $i >= 0; $i--) {
+    $mesKey = date('Y-m', strtotime("-$i months"));
+    $mensal[$mesKey] = ['mes' => $mesKey, 'total' => 0];
+}
+
+// Preencher com os dados reais
+foreach ($mensalRaw as $row) {
+    if (isset($mensal[$row['mes']])) {
+        $mensal[$row['mes']]['total'] = (int)$row['total'];
+    }
+}
+
+$mensal = array_values($mensal);
 
 // Top 10 requerentes (AGORA AFETADO PELOS FILTROS DE DATA E CATEGORIA)
 $topRequerentesSQL = "

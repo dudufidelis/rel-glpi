@@ -1,7 +1,17 @@
 let ticketsCache = []; //
 let totalsCache = { totalOpen: 0, totalResolved: 0 }; //
 
+// Mostrar/Esconder loading
+function showLoading() {
+  document.getElementById('loadingOverlay').classList.remove('hidden');
+}
+
+function hideLoading() {
+  document.getElementById('loadingOverlay').classList.add('hidden');
+}
+
 async function loadDashboard() {
+  showLoading();
   const cat = document.getElementById('category').value; //
   const start = document.getElementById('startDate').value; //
   const end = document.getElementById('endDate').value; //
@@ -17,6 +27,7 @@ async function loadDashboard() {
     if (data.error) {
         alert('Erro ao carregar dados: ' + data.error);
         console.error('Erro na API:', data.error);
+        hideLoading();
         return;
     }
 
@@ -106,10 +117,18 @@ async function loadDashboard() {
       existingChartMensal.destroy(); //
     }
     const ctx2 = document.getElementById('graficoMensal').getContext('2d'); //
+    
+    // Formatar labels para mês/ano em português
+    const mesesNomes = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+    const labelsFormatados = data.mensal.map(m => {
+      const [ano, mes] = m.mes.split('-');
+      return `${mesesNomes[parseInt(mes) - 1]}/${ano.slice(2)}`;
+    });
+    
     new Chart(ctx2, { //
       type: 'bar', //
       data: { //
-        labels: data.mensal.map(m => m.mes), //
+        labels: labelsFormatados, //
         datasets: [{ //
           label: 'Total de Chamados', //
           data: data.mensal.map(m => m.total), //
@@ -185,9 +204,12 @@ async function loadDashboard() {
       });
     }
 
+    hideLoading();
+
   } catch (error) {
     console.error('Erro ao carregar o dashboard:', error);
     alert('Ocorreu um erro ao carregar os dados. Tente novamente mais tarde.');
+    hideLoading();
   }
 }
 
@@ -222,57 +244,152 @@ function exportCSV() {
   link.click(); //
 }
 
+// Funções do Modal PDF
+function openPDFModal() {
+  if (!ticketsCache || ticketsCache.length === 0) {
+    alert('Não há dados para gerar o PDF. Carregue o dashboard primeiro.');
+    return;
+  }
+  document.getElementById('pdfModal').classList.remove('hidden');
+}
+
+function closePDFModal() {
+  document.getElementById('pdfModal').classList.add('hidden');
+}
+
 async function generatePDF() {
-  const { jsPDF } = window.jspdf; //
-  const doc = new jsPDF(); //
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
 
-  // Usa ticketsCache e totalsCache diretamente, sem uma nova requisição fetch
-  const ticketsToExport = ticketsCache; //
-  const totalOpen = totalsCache.totalOpen; //
-  const totalResolved = totalsCache.totalResolved; //
-
-  if (!ticketsToExport || ticketsToExport.length === 0) {
+  if (!ticketsCache || ticketsCache.length === 0) {
       alert('Não há dados para gerar o PDF. Carregue o dashboard primeiro.');
       return;
   }
-  
-  doc.setFontSize(16); //
-  doc.text("Relatório de Chamados GLPI", 105, 20, null, null, "center"); //
-  doc.setFontSize(10); //
-  // Pega os valores dos inputs para o período no PDF
-  const start = document.getElementById('startDate').value; //
-  const end = document.getElementById('endDate').value; //
-  doc.text(`Período: ${new Date(start).toLocaleDateString('pt-BR')} a ${new Date(end).toLocaleDateString('pt-BR')}`, 105, 28, null, null, "center"); //
-  doc.setFontSize(12); //
-  doc.text(`Total Aberto: ${totalOpen} | Total Resolvido: ${totalResolved}`, 105, 36, null, null, "center"); //
-  
-  const tableColumn = ["Título", "Status", "Requerente", "Data"]; //
-  const tableRows = []; //
 
-  ticketsToExport.forEach(t => { //
-    const dateParts = t.date.split(' ')[0].split('-'); //
-    const formattedDate = `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}`; //
-    const requesterName = t.full_requester_name && t.full_requester_name.trim() !== '' ? t.full_requester_name : 'N/A'; //
+  // Verificar colunas selecionadas
+  const colCodigo = document.getElementById('col_codigo').checked;
+  const colTitulo = document.getElementById('col_titulo').checked;
+  const colStatus = document.getElementById('col_status').checked;
+  const colRequerente = document.getElementById('col_requerente').checked;
+  const colData = document.getElementById('col_data').checked;
+
+  // Verificar se pelo menos uma coluna foi selecionada
+  if (!colCodigo && !colTitulo && !colStatus && !colRequerente && !colData) {
+    alert('Selecione pelo menos uma coluna para o relatório.');
+    return;
+  }
+
+  // Obter filtro de status selecionado
+  const filtroStatus = document.querySelector('input[name="filtro_status"]:checked').value;
+  
+  // Filtrar tickets com base na seleção
+  let ticketsToExport = [];
+  if (filtroStatus === 'todos') {
+    ticketsToExport = ticketsCache;
+  } else if (filtroStatus === 'abertos') {
+    ticketsToExport = ticketsCache.filter(t => {
+      const status = parseInt(t.status);
+      return status !== 5 && status !== 6;
+    });
+  } else if (filtroStatus === 'resolvidos') {
+    ticketsToExport = ticketsCache.filter(t => {
+      const status = parseInt(t.status);
+      return status === 5 || status === 6;
+    });
+  }
+
+  if (ticketsToExport.length === 0) {
+    alert('Não há chamados com o filtro selecionado.');
+    return;
+  }
+  
+  // Calcular abertos e resolvidos com base nos tickets filtrados para exportação
+  let abertos = 0;
+  let resolvidos = 0;
+  ticketsToExport.forEach(t => {
+    const status = parseInt(t.status);
+    if (status === 5 || status === 6) {
+      resolvidos++;
+    } else {
+      abertos++;
+    }
+  });
+
+  // Texto do filtro de status para o cabeçalho
+  let filtroStatusTexto = 'Todos';
+  if (filtroStatus === 'abertos') filtroStatusTexto = 'Não Resolvidos';
+  if (filtroStatus === 'resolvidos') filtroStatusTexto = 'Resolvidos/Fechados';
+  
+  // Obter informações dos filtros
+  const start = document.getElementById('startDate').value;
+  const end = document.getElementById('endDate').value;
+  const categorySelect = document.getElementById('category');
+  const categoryName = categorySelect.options[categorySelect.selectedIndex].text;
+  
+  // Cabeçalho do PDF - Preto/Branco/Cinza
+  doc.setFontSize(18);
+  doc.setTextColor(0, 0, 0);
+  doc.text("Relatório de Chamados GLPI", 105, 18, null, null, "center");
+  
+  // Linha separadora
+  doc.setDrawColor(150, 150, 150);
+  doc.line(15, 23, 195, 23);
+  
+  // Informações do filtro
+  doc.setFontSize(10);
+  doc.setTextColor(60, 60, 60);
+  
+  const startFormatted = new Date(start + 'T00:00:00').toLocaleDateString('pt-BR');
+  const endFormatted = new Date(end + 'T00:00:00').toLocaleDateString('pt-BR');
+  
+  doc.text(`Período: ${startFormatted} a ${endFormatted}`, 15, 30);
+  doc.text(`Categoria: ${categoryName}`, 15, 36);
+  doc.text(`Filtro: ${filtroStatusTexto}`, 15, 42);
+  
+  // Resumo no lado direito
+  doc.text(`Total: ${ticketsToExport.length}`, 150, 30);
+  doc.text(`Abertos: ${abertos}`, 150, 36);
+  doc.text(`Resolvidos: ${resolvidos}`, 150, 42);
+  
+  // Montar colunas dinamicamente
+  const tableColumn = [];
+  if (colCodigo) tableColumn.push("Cód.");
+  if (colTitulo) tableColumn.push("Título");
+  if (colStatus) tableColumn.push("Status");
+  if (colRequerente) tableColumn.push("Requerente");
+  if (colData) tableColumn.push("Data");
+
+  const tableRows = [];
+
+  ticketsToExport.forEach(t => {
+    const dateParts = t.date.split(' ')[0].split('-');
+    const formattedDate = `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}`;
+    const requesterName = t.full_requester_name && t.full_requester_name.trim() !== '' ? t.full_requester_name : 'N/A';
     
-    tableRows.push([ //
-      t.name, //
-      t.status_label, //
-      requesterName, //
-      formattedDate //
-    ]);
+    // Montar linha dinamicamente
+    const row = [];
+    if (colCodigo) row.push(t.id);
+    if (colTitulo) row.push(t.name);
+    if (colStatus) row.push(t.status_label);
+    if (colRequerente) row.push(requesterName);
+    if (colData) row.push(formattedDate);
+    
+    tableRows.push(row);
   });
 
-  doc.autoTable({ //
-    head: [tableColumn], //
-    body: tableRows, //
-    startY: 45, //
-    theme: 'striped', //
-    styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak' }, //
-    headStyles: { fillColor: [40, 40, 40], textColor: [255, 255, 255] }, //
-    margin: { top: 10 } //
+  doc.autoTable({
+    head: [tableColumn],
+    body: tableRows,
+    startY: 50,
+    theme: 'striped',
+    styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak', textColor: [0, 0, 0] },
+    headStyles: { fillColor: [60, 60, 60], textColor: [255, 255, 255], fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: [240, 240, 240] },
+    margin: { top: 10, left: 15, right: 15 }
   });
 
-  doc.save('relatorio_glpi.pdf'); //
+  doc.save('relatorio_glpi.pdf');
+  closePDFModal();
 }
 
 // Inicializa o dashboard e configura a atualização a cada 1 minuto
